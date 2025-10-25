@@ -169,7 +169,9 @@ class GraphClient {
     } catch (error) {
       logger.error(`Error in Graph API request: ${error}`);
       return {
-        content: [{ type: 'text', text: JSON.stringify({ error: (error as Error).message }) }],
+        content: [
+          { type: 'text', text: JSON.stringify({ error: 'An unexpected error occurred' }) },
+        ],
         isError: true,
       };
     }

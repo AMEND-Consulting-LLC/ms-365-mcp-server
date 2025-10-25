@@ -126,13 +126,8 @@ class AuthManager {
           cacheData = cachedData;
         }
       } catch (keytarError) {
-        logger.warn(
-          `Keychain access failed, falling back to file storage: ${(keytarError as Error).message}`
-        );
-      }
-
-      if (!cacheData && existsSync(FALLBACK_PATH)) {
-        cacheData = readFileSync(FALLBACK_PATH, 'utf8');
+        logger.error(`Keychain access failed: ${(keytarError as Error).message}`);
+        // Do not fall back to insecure file storage
       }
 
       if (cacheData) {
@@ -156,13 +151,10 @@ class AuthManager {
           selectedAccountData = cachedData;
         }
       } catch (keytarError) {
-        logger.warn(
-          `Keychain access failed for selected account, falling back to file storage: ${(keytarError as Error).message}`
+        logger.error(
+          `Keychain access failed for selected account: ${(keytarError as Error).message}`
         );
-      }
-
-      if (!selectedAccountData && existsSync(SELECTED_ACCOUNT_PATH)) {
-        selectedAccountData = readFileSync(SELECTED_ACCOUNT_PATH, 'utf8');
+        // Do not fall back to insecure file storage
       }
 
       if (selectedAccountData) {
@@ -182,11 +174,8 @@ class AuthManager {
       try {
         await keytar.setPassword(SERVICE_NAME, TOKEN_CACHE_ACCOUNT, cacheData);
       } catch (keytarError) {
-        logger.warn(
-          `Keychain save failed, falling back to file storage: ${(keytarError as Error).message}`
-        );
-
-        fs.writeFileSync(FALLBACK_PATH, cacheData);
+        logger.error(`Keychain save failed: ${(keytarError as Error).message}`);
+        // Do not fall back to insecure file storage
       }
     } catch (error) {
       logger.error(`Error saving token cache: ${(error as Error).message}`);
@@ -200,11 +189,10 @@ class AuthManager {
       try {
         await keytar.setPassword(SERVICE_NAME, SELECTED_ACCOUNT_KEY, selectedAccountData);
       } catch (keytarError) {
-        logger.warn(
-          `Keychain save failed for selected account, falling back to file storage: ${(keytarError as Error).message}`
+        logger.error(
+          `Keychain save failed for selected account: ${(keytarError as Error).message}`
         );
-
-        fs.writeFileSync(SELECTED_ACCOUNT_PATH, selectedAccountData);
+        // Do not fall back to insecure file storage
       }
     } catch (error) {
       logger.error(`Error saving selected account: ${(error as Error).message}`);
@@ -383,13 +371,7 @@ class AuthManager {
         logger.warn(`Keychain deletion failed: ${(keytarError as Error).message}`);
       }
 
-      if (fs.existsSync(FALLBACK_PATH)) {
-        fs.unlinkSync(FALLBACK_PATH);
-      }
-
-      if (fs.existsSync(SELECTED_ACCOUNT_PATH)) {
-        fs.unlinkSync(SELECTED_ACCOUNT_PATH);
-      }
+      // Fallback files are no longer used, so no need to delete them
 
       return true;
     } catch (error) {

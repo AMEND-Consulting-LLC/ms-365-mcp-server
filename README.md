@@ -245,6 +245,12 @@ registration:
 
 With these configured, the server will use your custom Azure app instead of the built-in one.
 
+### Security Best Practices
+
+For production environments, it is strongly recommended to use a dedicated secret management system, such as Azure Key Vault, AWS Secrets Manager, or HashiCorp Vault, to store and manage sensitive information like `MS365_MCP_CLIENT_SECRET`. Using `.env` files is suitable for development but not recommended for production.
+
+**Note on Token Storage**: As of the latest security updates, the insecure fallback of storing tokens in a plaintext file has been removed. The server now relies exclusively on the operating system's credential store (`keytar`). If the credential store is unavailable, the server will fail securely rather than exposing sensitive tokens.
+
 #### 3. Bring Your Own Token (BYOT)
 
 If you are running ms-365-mcp-server as part of a larger system that manages Microsoft OAuth tokens externally, you can

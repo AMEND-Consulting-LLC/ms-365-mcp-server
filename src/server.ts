@@ -16,6 +16,7 @@ import {
   refreshAccessToken,
 } from './lib/microsoft-auth.js';
 import type { CommandOptions } from './cli.ts';
+import { z } from 'zod';
 
 // Store registered clients in memory (in production, use a database)
 interface RegisteredClient {
@@ -30,6 +31,17 @@ interface RegisteredClient {
 }
 
 const registeredClients = new Map<string, RegisteredClient>();
+const codeState = new Map<string, { code_challenge: string; state: string }>();
+
+const tokenRequestSchema = z.object({
+  grant_type: z.enum(['authorization_code', 'refresh_token']),
+  client_id: z.string().optional(),
+  code: z.string().optional(),
+  redirect_uri: z.string().optional(),
+  code_verifier: z.string().optional(),
+  refresh_token: z.string().optional(),
+  state: z.string().optional(),
+});
 
 class MicrosoftGraphServer {
   private authManager: AuthManager;
@@ -89,6 +101,12 @@ class MicrosoftGraphServer {
     if (this.options.http) {
       const port = typeof this.options.http === 'string' ? parseInt(this.options.http) : 3000;
 
+      const clientSecret = process.env.MS365_MCP_CLIENT_SECRET;
+      if (!clientSecret) {
+        logger.error('MS365_MCP_CLIENT_SECRET is not configured');
+        throw new Error('MS365_MCP_CLIENT_SECRET is not configured');
+      }
+
       const app = express();
       app.use(express.json());
       app.use(express.urlencoded({ extended: true }));
@@ -124,7 +142,7 @@ class MicrosoftGraphServer {
           response_types_supported: ['code'],
           response_modes_supported: ['query'],
           grant_types_supported: ['authorization_code', 'refresh_token'],
-          token_endpoint_auth_methods_supported: ['none'],
+          token_endpoint_auth_methods_supported: ['client_secret_post'],
           code_challenge_methods_supported: ['S256'],
           scopes_supported: ['User.Read', 'Files.Read', 'Mail.Read'],
         });
@@ -157,7 +175,7 @@ class MicrosoftGraphServer {
           grant_types: body.grant_types || ['authorization_code', 'refresh_token'],
           response_types: body.response_types || ['code'],
           scope: body.scope,
-          token_endpoint_auth_method: 'none',
+          token_endpoint_auth_method: 'client_secret_post',
           created_at: Date.now(),
         });
 
@@ -169,7 +187,7 @@ class MicrosoftGraphServer {
           grant_types: body.grant_types || ['authorization_code', 'refresh_token'],
           response_types: body.response_types || ['code'],
           scope: body.scope,
-          token_endpoint_auth_method: 'none',
+          token_endpoint_auth_method: 'client_secret_post',
         });
       });
 
@@ -211,7 +229,39 @@ class MicrosoftGraphServer {
           microsoftAuthUrl.searchParams.set('scope', 'User.Read Files.Read Mail.Read');
         }
 
+        // Store the state and code_challenge
+        const state = crypto.randomUUID();
+        const codeChallenge = url.searchParams.get('code_challenge');
+        if (codeChallenge) {
+          codeState.set(state, { code_challenge: codeChallenge, state });
+        }
+
+        microsoftAuthUrl.searchParams.set('state', state);
+
         // Redirect to Microsoft's authorization page
+        const redirectUri = url.searchParams.get('redirect_uri');
+        if (!redirectUri) {
+          return res.status(400).json({
+            error: 'invalid_request',
+            error_description: 'redirect_uri is required',
+          });
+        }
+
+        const client = registeredClients.get(url.searchParams.get('client_id') as string);
+        if (!client) {
+          return res.status(400).json({
+            error: 'invalid_client',
+            error_description: 'Client not registered',
+          });
+        }
+
+        if (!client.redirect_uris.includes(redirectUri)) {
+          return res.status(400).json({
+            error: 'invalid_request',
+            error_description: 'Invalid redirect_uri',
+          });
+        }
+
         res.redirect(microsoftAuthUrl.toString());
       });
 
@@ -229,41 +279,57 @@ class MicrosoftGraphServer {
             contentType: req.get('Content-Type'),
           });
 
-          const body = req.body;
+          const parseResult = tokenRequestSchema.safeParse(req.body);
 
-          // Add debugging and validation
-          if (!body) {
-            logger.error('Token endpoint: Request body is undefined');
-            res.status(400).json({
+          if (!parseResult.success) {
+            return res.status(400).json({
               error: 'invalid_request',
-              error_description: 'Request body is required',
+              error_description: 'Invalid request body',
+              details: parseResult.error.errors,
             });
-            return;
           }
 
-          if (!body.grant_type) {
-            logger.error('Token endpoint: grant_type is missing', { body });
-            res.status(400).json({
-              error: 'invalid_request',
-              error_description: 'grant_type parameter is required',
-            });
-            return;
-          }
+          const body = parseResult.data;
 
           if (body.grant_type === 'authorization_code') {
+            if (!body.client_id) {
+              return res.status(400).json({
+                error: 'invalid_request',
+                error_description: 'client_id is required',
+              });
+            }
+
+            const client = registeredClients.get(body.client_id as string);
+            if (!client) {
+              return res.status(400).json({
+                error: 'invalid_client',
+                error_description: 'Client not registered',
+              });
+            }
+
+            const state = codeState.get(body.state as string);
+            if (!state) {
+              return res.status(400).json({
+                error: 'invalid_request',
+                error_description: 'Invalid state',
+              });
+            }
+
+            const codeVerifier = body.code_verifier as string;
+            const codeChallenge = crypto
+              .createHash('sha256')
+              .update(codeVerifier)
+              .digest('base64url');
+
+            if (codeChallenge !== state.code_challenge) {
+              return res.status(400).json({
+                error: 'invalid_request',
+                error_description: 'Invalid code_verifier',
+              });
+            }
             const tenantId = process.env.MS365_MCP_TENANT_ID || 'common';
             const clientId =
               process.env.MS365_MCP_CLIENT_ID || '084a3e9f-a9f4-43f7-89f9-d229cf97853e';
-            const clientSecret = process.env.MS365_MCP_CLIENT_SECRET;
-
-            if (!clientSecret) {
-              logger.error('Token endpoint: MS365_MCP_CLIENT_SECRET is not configured');
-              res.status(500).json({
-                error: 'server_error',
-                error_description: 'Server configuration error',
-              });
-              return;
-            }
 
             const result = await exchangeCodeForToken(
               body.code as string,
@@ -278,16 +344,6 @@ class MicrosoftGraphServer {
             const tenantId = process.env.MS365_MCP_TENANT_ID || 'common';
             const clientId =
               process.env.MS365_MCP_CLIENT_ID || '084a3e9f-a9f4-43f7-89f9-d229cf97853e';
-            const clientSecret = process.env.MS365_MCP_CLIENT_SECRET;
-
-            if (!clientSecret) {
-              logger.error('Token endpoint: MS365_MCP_CLIENT_SECRET is not configured');
-              res.status(500).json({
-                error: 'server_error',
-                error_description: 'Server configuration error',
-              });
-              return;
-            }
 
             const result = await refreshAccessToken(
               body.refresh_token as string,
